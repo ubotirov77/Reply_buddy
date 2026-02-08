@@ -1,9 +1,16 @@
 import os
 import asyncio
+import random
 from openai import OpenAI
 
 from telegram import Update
-from telegram.ext import Application, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    CommandHandler,
+    ContextTypes,
+    filters,
+)
 
 # ====== ENV ======
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -48,10 +55,10 @@ CHILL_PROMPT_ADDON = """
 Mode: CHILL. Be extra polite and calm.
 """
 
-def clamp_history(history, max_items=14):
+def clamp_history(history, max_items=12):
     return history[-max_items:] if len(history) > max_items else history
 
-async def ai_complete(messages: list[dict]) -> str:
+def ai_complete_sync(messages: list[dict]) -> str:
     resp = client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
@@ -59,17 +66,30 @@ async def ai_complete(messages: list[dict]) -> str:
     )
     return (resp.choices[0].message.content or "").strip()
 
+# ====== /start ======
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.setdefault("mode", "roast")
+    await update.message.reply_text(
+        "😄 Salom! Men Silicon Buddy — prank AI bot.\n"
+        "Oddiy yozing, men javob beraman.\n\n"
+        "🔥 Roast mode yoqish: `roast on`\n"
+        "🧊 Chill mode: `roast off`",
+        parse_mode="Markdown",
+    )
+
+# ====== MAIN MESSAGE HANDLER ======
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
     text = update.message.text.strip()
 
-    # Roast mode toggle (simple)
+    # Roast mode toggle (simple text commands)
     if text.lower() == ROAST_ON_TEXT:
         context.user_data["mode"] = "roast"
         await update.message.reply_text("🔥 Roast mode ON. Endi gapni kesaman (hazil) 😄")
         return
+
     if text.lower() == ROAST_OFF_TEXT:
         context.user_data["mode"] = "chill"
         await update.message.reply_text("🧊 Chill mode ON. Endi muloyimroqman 🙂")
@@ -77,7 +97,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Small prank typing delay
     if TYPING_DELAY_MAX > 0:
-        import random
         await asyncio.sleep(random.uniform(TYPING_DELAY_MIN, TYPING_DELAY_MAX))
 
     # Conversation memory per-user
@@ -85,13 +104,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "user", "content": text})
     history = clamp_history(history, 12)
 
-    mode = context.user_data.get("mode", "roast")  # default roast
+    mode = context.user_data.get("mode", "roast")
     addon = ROAST_PROMPT_ADDON if mode == "roast" else CHILL_PROMPT_ADDON
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + addon}] + history
 
     try:
-        answer = await asyncio.to_thread(ai_complete, messages)
+        # OpenAI call in thread to avoid blocking event loop
+        answer = await asyncio.to_thread(ai_complete_sync, messages)
         if not answer:
             answer = "Hmm… brain.exe qotib qoldi 😅 Qaytadan yoz."
     except Exception:
@@ -104,7 +124,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # /start command
+    app.add_handler(CommandHandler("start", start))
+
+    # text messages (non-commands)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # run
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
