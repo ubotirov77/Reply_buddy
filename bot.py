@@ -6,133 +6,106 @@ from openai import OpenAI
 from telegram import Update
 from telegram.ext import (
     Application,
-    MessageHandler,
-    CommandHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 
-# ====== ENV ======
+# ===== ENV =====
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
+# Render vars
+PORT = int(os.getenv("PORT", "10000"))
+PUBLIC_URL = (os.getenv("RENDER_EXTERNAL_URL", "") or os.getenv("PUBLIC_URL", "")).strip()
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram").strip()  # keep starting with /
+
 if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN env yo'q. Render -> Environment variables ga qo'ying.")
+    raise RuntimeError("TELEGRAM_BOT_TOKEN yo'q")
 if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY env yo'q. Render -> Environment variables ga qo'ying.")
+    raise RuntimeError("OPENAI_API_KEY yo'q")
+if not PUBLIC_URL:
+    raise RuntimeError("RENDER_EXTERNAL_URL yoki PUBLIC_URL yo'q")
+
+WEBHOOK_URL = f"{PUBLIC_URL}{WEBHOOK_PATH}"
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-
-# ====== PERSONA (prank vibe, lekin o'zini odam deb ko'rsatmaydi) ======
-SYSTEM_PROMPT = """
-You are "Silicon Buddy" — witty, confident, slightly sarcastic, friendly.
-Reply in Uzbek mostly (mix small English tech slang ok).
-Keep replies short: 1–3 sentences.
-Occasionally add a tiny emoji, not too many.
-
-Safety rules:
-- Never claim to be a real human. If asked, say you are an AI bot.
-- Don't generate harassment, threats, or doxxing. If user asks for private info, refuse briefly.
-- If topic becomes serious/sensitive, drop the jokes and be supportive.
-"""
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.85"))
 
-# Typing delay prank effect (seconds). Set 0 to disable.
-TYPING_DELAY_MIN = float(os.getenv("TYPING_DELAY_MIN", "1.2"))
-TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "3.5"))
+TYPING_DELAY_MIN = float(os.getenv("TYPING_DELAY_MIN", "0.8"))
+TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "2.5"))
 
-# ====== COMMAND-LIKE SWITCHES ======
-ROAST_ON_TEXT = "roast on"
-ROAST_OFF_TEXT = "roast off"
+SYSTEM_PROMPT = """
+You are "Silicon Buddy" — witty, confident, slightly sarcastic, friendly.
+Reply mostly in Uzbek (tiny English tech slang ok).
+Keep replies short: 1–3 sentences. Add a small emoji sometimes.
 
-ROAST_PROMPT_ADDON = """
-Mode: ROAST (playful). Light teasing, never cruel. No insults about protected traits.
+Rules:
+- Never claim to be a real human. If asked, say you are an AI bot.
+- No doxxing/threats/harassment.
+- If topic turns serious, be kind and stop joking.
 """
 
-CHILL_PROMPT_ADDON = """
-Mode: CHILL. Be extra polite and calm.
-"""
-
-def clamp_history(history, max_items=12):
-    return history[-max_items:] if len(history) > max_items else history
-
-def ai_complete_sync(messages: list[dict]) -> str:
-    resp = client.chat.completions.create(
+def _ai(messages):
+    r = client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
         temperature=TEMPERATURE,
     )
-    return (resp.choices[0].message.content or "").strip()
+    return (r.choices[0].message.content or "").strip()
 
-# ====== /start ======
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.setdefault("mode", "roast")
-    await update.message.reply_text(
-        "😄 Salom! Men Silicon Buddy — prank AI bot.\n"
-        "Oddiy yozing, men javob beraman.\n\n"
-        "🔥 Roast mode yoqish: `roast on`\n"
-        "🧊 Chill mode: `roast off`",
-        parse_mode="Markdown",
-    )
-
-# ====== MAIN MESSAGE HANDLER ======
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
+async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Telegram Business update’lari shu yerga keladi.
+    Muhim: business_connection_id bilan reply qilish kerak.
+    """
+    bm = update.business_message
+    if not bm or not bm.message or not bm.message.text:
         return
 
-    text = update.message.text.strip()
+    text = bm.message.text.strip()
+    business_connection_id = bm.business_connection_id
+    chat_id = bm.message.chat_id  # shu chatga reply
 
-    # Roast mode toggle (simple text commands)
-    if text.lower() == ROAST_ON_TEXT:
-        context.user_data["mode"] = "roast"
-        await update.message.reply_text("🔥 Roast mode ON. Endi gapni kesaman (hazil) 😄")
-        return
-
-    if text.lower() == ROAST_OFF_TEXT:
-        context.user_data["mode"] = "chill"
-        await update.message.reply_text("🧊 Chill mode ON. Endi muloyimroqman 🙂")
-        return
-
-    # Small prank typing delay
+    # prank typing delay
     if TYPING_DELAY_MAX > 0:
         await asyncio.sleep(random.uniform(TYPING_DELAY_MIN, TYPING_DELAY_MAX))
 
-    # Conversation memory per-user
-    history = context.user_data.get("history", [])
-    history.append({"role": "user", "content": text})
-    history = clamp_history(history, 12)
-
-    mode = context.user_data.get("mode", "roast")
-    addon = ROAST_PROMPT_ADDON if mode == "roast" else CHILL_PROMPT_ADDON
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + addon}] + history
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": text},
+    ]
 
     try:
-        # OpenAI call in thread to avoid blocking event loop
-        answer = await asyncio.to_thread(ai_complete_sync, messages)
+        answer = await asyncio.to_thread(_ai, messages)
         if not answer:
-            answer = "Hmm… brain.exe qotib qoldi 😅 Qaytadan yoz."
-    except Exception:
-        answer = "Serverim biroz charchadi 😭 Keyinroq yozib ko‘r."
+            answer = "brain.exe qotdi 😅 Qaytadan yoz."
+    except Exception as e:
+        print("OPENAI_ERROR:", repr(e))
+        answer = "AI hozir ulanmadi 😭 Keyinroq yoz."
 
-    history.append({"role": "assistant", "content": answer})
-    context.user_data["history"] = clamp_history(history, 12)
-
-    await update.message.reply_text(answer)
+    # MUHIM: business_connection_id bilan yuboriladi (siz nomingizdan)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=answer,
+        business_connection_id=business_connection_id,
+    )
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # /start command
-    app.add_handler(CommandHandler("start", start))
+    # Faqat Business chatlar uchun handler
+    app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business_message))
 
-    # text messages (non-commands)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # run
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=WEBHOOK_PATH.lstrip("/"),
+        webhook_url=WEBHOOK_URL,
+        drop_pending_updates=True,
+    )
 
 if __name__ == "__main__":
     main()
