@@ -15,95 +15,74 @@ from telegram.ext import (
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
-# Render vars
 PORT = int(os.getenv("PORT", "10000"))
 PUBLIC_URL = (os.getenv("RENDER_EXTERNAL_URL", "") or os.getenv("PUBLIC_URL", "")).strip()
-WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram").strip()  # keep starting with /
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram").strip()
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN yo'q")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY yo'q")
 if not PUBLIC_URL:
-    raise RuntimeError("RENDER_EXTERNAL_URL yoki PUBLIC_URL yo'q")
+    raise RuntimeError("PUBLIC URL yo'q (Render Web Service bo‘lishi kerak)")
+
+if not WEBHOOK_PATH.startswith("/"):
+    WEBHOOK_PATH = "/" + WEBHOOK_PATH
 
 WEBHOOK_URL = f"{PUBLIC_URL}{WEBHOOK_PATH}"
 
+print("Webhook URL:", WEBHOOK_URL)
+
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.85"))
+SYSTEM_PROMPT = "Reply in short witty Uzbek. You are AI."
 
-TYPING_DELAY_MIN = float(os.getenv("TYPING_DELAY_MIN", "0.8"))
-TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "2.5"))
-
-SYSTEM_PROMPT = """
-You are "Silicon Buddy" — witty, confident, slightly sarcastic, friendly.
-Reply mostly in Uzbek (tiny English tech slang ok).
-Keep replies short: 1–3 sentences. Add a small emoji sometimes.
-
-Rules:
-- Never claim to be a real human. If asked, say you are an AI bot.
-- No doxxing/threats/harassment.
-- If topic turns serious, be kind and stop joking.
-"""
-
-def _ai(messages):
+def ai_call(text):
     r = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=TEMPERATURE,
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ],
     )
-    return (r.choices[0].message.content or "").strip()
+    return r.choices[0].message.content
 
-async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Telegram Business update’lari shu yerga keladi.
-    Muhim: business_connection_id bilan reply qilish kerak.
-    """
+async def handle_business(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bm = update.business_message
     if not bm or not bm.message or not bm.message.text:
         return
 
-    text = bm.message.text.strip()
-    business_connection_id = bm.business_connection_id
-    chat_id = bm.message.chat_id  # shu chatga reply
+    text = bm.message.text
+    bc_id = bm.business_connection_id
+    chat_id = bm.message.chat_id
 
-    # prank typing delay
-    if TYPING_DELAY_MAX > 0:
-        await asyncio.sleep(random.uniform(TYPING_DELAY_MIN, TYPING_DELAY_MAX))
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": text},
-    ]
+    await asyncio.sleep(random.uniform(0.5, 2))
 
     try:
-        answer = await asyncio.to_thread(_ai, messages)
-        if not answer:
-            answer = "brain.exe qotdi 😅 Qaytadan yoz."
+        answer = await asyncio.to_thread(ai_call, text)
     except Exception as e:
-        print("OPENAI_ERROR:", repr(e))
-        answer = "AI hozir ulanmadi 😭 Keyinroq yoz."
+        print("AI ERROR:", e)
+        answer = "AI ishlamayapti 😅"
 
-    # MUHIM: business_connection_id bilan yuboriladi (siz nomingizdan)
     await context.bot.send_message(
         chat_id=chat_id,
         text=answer,
-        business_connection_id=business_connection_id,
+        business_connection_id=bc_id
     )
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Faqat Business chatlar uchun handler
-    app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business_message))
+    app.add_handler(
+        MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business)
+    )
 
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=WEBHOOK_PATH.lstrip("/"),
+        url_path=WEBHOOK_PATH[1:],
         webhook_url=WEBHOOK_URL,
+        allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
     )
 
